@@ -1310,6 +1310,7 @@ Copyright 2022 The Go Authors. All rights reserved.
 Copyright 2023 The Go Authors. All rights reserved.
 Copyright 2024 The Go Authors. All rights reserved.
 Copyright 2025 The Go Authors. All rights reserved.
+Copyright 2026 The Go Authors. All rights reserved.
 
 == Patents
 Additional IP Rights Grant (Patents)
@@ -1517,6 +1518,7 @@ Copyright 2022 The Go Authors. All rights reserved.
 Copyright 2023 The Go Authors. All rights reserved.
 Copyright 2024 The Go Authors. All rights reserved.
 Copyright 2025 The Go Authors. All rights reserved.
+Copyright 2026 The Go Authors. All rights reserved.
 
 == Patents
 Additional IP Rights Grant (Patents)
@@ -3140,4 +3142,4 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 === ATTRIBUTION-HELPER-GENERATED:
 === Attribution helper version: {Major:0 Minor:11 GitVersion:2a434e4d GitCommit:2a434e4d7eea22d4dfd2d1cf04909239d05562b1 GitTreeState:clean BuildDate:2024-12-16T20:09:06Z GoVersion:go1.25.1 Compiler:gc Platform:darwin/arm64}
-=== License file based on go.mod with md5 sum:  8ac47f2ac88d71793fbacd6d3a935f8c
+=== License file based on go.mod with md5 sum:  0c06450704ffb5c78c865d9fbb38e9a1
