@@ -6,7 +6,7 @@
 # Licensed under the Universal Permissive License v 1.0 as shown at https://oss.oracle.com/licenses/upl/
 
 # --- Builder Stage ---
-ARG BUILDER_IMAGE=golang:1.26.4-alpine@sha256:7a3e50096189ad57c9f9f865e7e4aa8585ed1585248513dc5cda498e2f41812c
+ARG BUILDER_IMAGE=golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648
 ARG BASE_IMAGE=oraclelinux:8-slim@sha256:8a6543d3973a05ca181ad67375df5371f6634a266f6ee1be14c4b6f46d41e132
 FROM --platform=$BUILDPLATFORM $BUILDER_IMAGE AS builder
 

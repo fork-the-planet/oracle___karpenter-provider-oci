@@ -161,3 +161,27 @@ func TestHashNodeClassSpec_StaticFieldsCloning(t *testing.T) {
 	require.NotEqual(t, baselineHash, hashAfterAgentListChange,
 		fmt.Sprintf("Hash must change when AgentList changes, but did not (still '%v')", baselineHash))
 }
+
+func TestKarpenterHash_NewOptionalAttributes_shouldNotChange(t *testing.T) {
+	test1 := struct {
+		name string
+	}{
+		"Hello",
+	}
+
+	test2 := struct {
+		name    string
+		list    []string
+		pointer *string
+	}{
+		"Hello",
+		make([]string, 0),
+		nil,
+	}
+	var testInf1 []interface{}
+	var testInf2 []interface{}
+	testInf1 = append(testInf1, test1)
+	testInf2 = append(testInf2, test2)
+
+	require.Equal(t, KarpenterHash(testInf1), KarpenterHash(testInf2))
+}

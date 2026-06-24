@@ -135,6 +135,8 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1.NodeClaim)
 		return nil, err
 	}
 
+	instancetype.CheckTaintsAndPrintWarnings(ctx, nodeClaim)
+
 	// filter instance type with requirement
 	instanceTypes, err := c.resolveInstanceTypes(ctx, nodeClaim, nodeClass)
 	if err != nil {

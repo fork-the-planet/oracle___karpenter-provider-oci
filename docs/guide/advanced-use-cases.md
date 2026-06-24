@@ -16,6 +16,10 @@ spec:
         - key: karpenter.sh/capacity-type
           operator: In
           values: ["spot"]
+      taints:
+        - effect: NoSchedule
+          key: oci.oraclecloud.com/oke-is-preemptible
+          value: present
 ```
 
 KPO maps the Karpenter `spot` capacity type to OCI **preemptible** instances. For details, see [OCI Preemptible Instances](https://docs.oracle.com/en-us/iaas/Content/Compute/Concepts/preemptible.htm).

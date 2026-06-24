@@ -796,13 +796,14 @@ func (p *DefaultProvider) setOfferings(ctx context.Context, it *OciInstanceType,
 			AvailabilityForShape(it.Shape, it.Ocpu, it.MemoryInGbs, it.SupportShapeConfig)
 	}
 
-	hasPreemptibleTaints := checkTaintExists(taints, PreemptibleTaintKey, v1.TaintEffectNoSchedule)
+	hasPreemptibleTaints := checkTaintExists(taints, PreemptibleTaintKey)
 	// Preemptible capacity does not support burstable instances, nor capacity reservation.
 	if available && isPreemptible && !IsBurstableShape(it) && len(capResAdMap) == 0 {
 		if hasPreemptibleTaints {
 			offerings = append(offerings, makeSpotOffering(shapeAndAd.Ads, basePrice*0.5)...)
 		} else {
-			log.FromContext(ctx).V(1).Info(fmt.Sprintf("Missing '%s' taints for preemptible shapes", PreemptibleTaintKey))
+			log.FromContext(ctx).V(1).Info(fmt.Sprintf("Missing '%s' taints for preemptible shape '%s'",
+				PreemptibleTaintKey, *shapeAndAd.Shape.Shape))
 		}
 	}
 
@@ -832,14 +833,29 @@ func (p *DefaultProvider) setOfferings(ctx context.Context, it *OciInstanceType,
 	return nil
 }
 
-func checkTaintExists(taints []v1.Taint, taintKey string, taintEffect v1.TaintEffect) bool {
-	hasPreemptibleTaints := false
+func checkTaintExists(taints []v1.Taint, taintKey string) bool {
+	hasTaints := false
 	if len(taints) > 0 {
-		_, hasPreemptibleTaints = lo.Find(taints, func(item v1.Taint) bool {
-			return item.Key == taintKey && item.Effect == taintEffect
+		_, hasTaints = lo.Find(taints, func(item v1.Taint) bool {
+			return item.Key == taintKey && item.Effect == v1.TaintEffectNoSchedule
 		})
 	}
-	return hasPreemptibleTaints
+	return hasTaints
+}
+
+func CheckTaintsAndPrintWarnings(ctx context.Context, nodeClaim *corev1.NodeClaim) {
+	lg := log.FromContext(ctx)
+
+	if !checkTaintExists(nodeClaim.Spec.Taints, NvidiaGpuTaintKey) &&
+		!checkTaintExists(nodeClaim.Spec.Taints, AmdGpuTaintKey) {
+		lg.Info(fmt.Sprintf("NodeCalim doesn't have taints '%s' or '%s' will not offer GPU shapes",
+			NvidiaGpuTaintKey, AmdGpuTaintKey))
+	}
+
+	if !checkTaintExists(nodeClaim.Spec.Taints, PreemptibleTaintKey) {
+		lg.Info(fmt.Sprintf("NodeCalim doesn't have taint '%s' will not offer preemptible shape",
+			PreemptibleTaintKey))
+	}
 }
 
 func (p *DefaultProvider) refreshClusterVersion(ctx context.Context) error {
@@ -874,11 +890,12 @@ func (p *DefaultProvider) ListInstanceTypes(ctx context.Context,
 	instanceTypes := make([]*OciInstanceType, 0)
 	for _, shapeAd := range p.shapeAdMap {
 		if IsGpuShape(*shapeAd.Shape) &&
-			!checkTaintExists(taints, NvidiaGpuTaintKey, v1.TaintEffectNoSchedule) &&
-			!checkTaintExists(taints, AmdGpuTaintKey, v1.TaintEffectNoSchedule) {
+			!checkTaintExists(taints, NvidiaGpuTaintKey) &&
+			!checkTaintExists(taints, AmdGpuTaintKey) {
 			// If it is GPU shape and missing nvidia.com/gpu NoSchedule taint will stop offer this shape
 			log.FromContext(ctx).V(1).
-				Info(fmt.Sprintf("Missing '%s' or '%s' taints for gpu shapes", NvidiaGpuTaintKey, AmdGpuTaintKey))
+				Info(fmt.Sprintf("Missing '%s' or '%s' taints for gpu shape '%s'",
+					NvidiaGpuTaintKey, AmdGpuTaintKey, *shapeAd.Shape.Shape))
 			continue
 		}
 
