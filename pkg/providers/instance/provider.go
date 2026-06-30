@@ -25,6 +25,7 @@ import (
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/network"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/npn"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/placement"
+	"github.com/oracle/oci-go-sdk/v65/common"
 	ocicore "github.com/oracle/oci-go-sdk/v65/core"
 	ociwr "github.com/oracle/oci-go-sdk/v65/workrequests"
 	"github.com/samber/lo"
@@ -440,6 +441,7 @@ func (p *DefaultProvider) ListInstances(ctx context.Context, compartmentId strin
 	for {
 		resp, err := p.computeClient.ListInstances(ctx, ocicore.ListInstancesRequest{
 			CompartmentId: &compartmentId,
+			Limit:         common.Int(100),
 			Page:          page,
 		})
 
