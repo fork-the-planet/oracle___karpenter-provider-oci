@@ -532,7 +532,9 @@ func buildCreateVnicDetails(network *network.NetworkResolveResult,
 			c.SkipSourceDestCheck = lo.ToPtr(true)
 		}
 
-		c.SecurityAttributes = npn.MapValueStringToMapValueInterface(primaryVnicDetails.SecurityAttributes)
+		if len(primaryVnicDetails.SecurityAttributes) > 0 {
+			c.SecurityAttributes = npn.MapValueStringToMapValueInterface(primaryVnicDetails.SecurityAttributes)
+		}
 		c.Ipv6AddressIpv6SubnetCidrPairDetails =
 			npn.ToOciCoreIpvAddressCidrPair(primaryVnicDetails.Ipv6AddressIpv6SubnetCidrPairDetails)
 	}

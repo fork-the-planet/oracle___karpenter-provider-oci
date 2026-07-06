@@ -566,7 +566,7 @@ func TestProvider_BuildCreateVnicDetails(t *testing.T) {
 		}
 
 		if tc.securityAttributes == nil {
-			assert.True(t, len(result.SecurityAttributes) == 0)
+			assert.True(t, result.SecurityAttributes == nil)
 		} else {
 			for k, v := range tc.securityAttributes {
 				for k1, value1 := range v {
