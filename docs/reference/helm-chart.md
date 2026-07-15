@@ -88,6 +88,7 @@ A Helm chart for Karpenter provider OCI
 | settings.rateLimiter.disable | bool | `true` | Disable the OCI client-side rate limiter. |
 | settings.rateLimiter.qpsRead | int | `0` | Read QPS for the OCI client-side rate limiter. 0 uses the built-in default. |
 | settings.rateLimiter.qpsWrite | int | `0` | Write QPS for the OCI client-side rate limiter. 0 uses the built-in default. |
+| settings.unavailableOfferingsTTLSeconds | int | `180` | How long, in seconds, an offering observed to be out of host capacity is treated as unavailable before Karpenter retries it. Lower values retry exhausted offerings sooner; higher values reduce repeated launch attempts (and OCI throttling) against capacity that is unlikely to recover quickly. Set to 0 to disable the unavailable-offerings cache entirely, in which case offerings are never marked unavailable and Karpenter does not route around capacity-exhausted offerings. |
 | settings.vcnCompartmentId | string | `""` | [required] Cluster's VCN compartment OCID. |
 | strategy | object | `{"rollingUpdate":{"maxUnavailable":1}}` | Strategy for updating the pod. |
 | terminationGracePeriodSeconds | string | `nil` | Override the default termination grace period for the pod. |

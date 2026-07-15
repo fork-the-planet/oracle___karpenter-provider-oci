@@ -55,6 +55,11 @@ var (
 	ipV6DualStack   = []network.IpFamily{network.IPv4, network.IPv6}
 )
 
+const (
+	testZonePHXAD1       = "PHX-AD-1"
+	testCapacityTypeSpot = "spot"
+)
+
 type fakeCapacityReservationProvider struct {
 	results []capacityreservation.ResolveResult
 	err     error
@@ -195,7 +200,7 @@ func TestMakeRequirementAndOffering(t *testing.T) {
 	// Should have capacity type and zone
 	assert.Equal(t, corev1.CapacityTypeOnDemand, reqs.Get(corev1.CapacityTypeLabelKey).Any())
 	// Zone value should be PHX-AD-1 (derived from AD)
-	assert.Equal(t, "PHX-AD-1", reqs.Get(v1.LabelTopologyZone).Any())
+	assert.Equal(t, testZonePHXAD1, reqs.Get(v1.LabelTopologyZone).Any())
 
 	off := makeOffering("tenancy:PHX-AD-1", 0.42, corev1.CapacityTypeOnDemand, true)
 	assert.True(t, off.Available)
@@ -774,7 +779,7 @@ func TestFinalizeRequirements(t *testing.T) {
 					Requirements: scheduling.NewRequirements(
 						scheduling.NewRequirement(corev1.CapacityTypeLabelKey, v1.NodeSelectorOpIn,
 							corev1.CapacityTypeOnDemand),
-						scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, "PHX-AD-1"),
+						scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, testZonePHXAD1),
 					),
 					Available: true,
 					Price:     0.1,
@@ -786,7 +791,7 @@ func TestFinalizeRequirements(t *testing.T) {
 	p.finalizeRequirements(it, sa)
 	// Zones captured from ShapeAndAd, OS linux, arch amd64 (E4)
 	assert.Equal(t, "amd64", it.Requirements.Get(v1.LabelArchStable).Any())
-	assert.ElementsMatch(t, []string{"PHX-AD-1", "PHX-AD-2"}, it.Requirements.Get(v1.LabelTopologyZone).Values())
+	assert.ElementsMatch(t, []string{testZonePHXAD1, "PHX-AD-2"}, it.Requirements.Get(v1.LabelTopologyZone).Values())
 	assert.Equal(t, "linux", it.Requirements.Get(v1.LabelOSStable).Any())
 }
 
@@ -1036,7 +1041,7 @@ func TestMakeReservedOffering(t *testing.T) {
 	// Should include at least one offering for AD-1 with capacity 6 (10-4)
 	found := false
 	for _, o := range offerings {
-		if o.Requirements.Get(v1.LabelTopologyZone).Any() == "PHX-AD-1" && o.ReservationCapacity == 6 {
+		if o.Requirements.Get(v1.LabelTopologyZone).Any() == testZonePHXAD1 && o.ReservationCapacity == 6 {
 			assert.Equal(t, basePrice, o.Price)
 			found = true
 			break
@@ -1188,7 +1193,7 @@ func TestFinalizeRequirements_AddsSpecialShapeRequirements(t *testing.T) {
 		Shape: "VM.Standard3.DenseIO64"}
 	p := &DefaultProvider{}
 	p.finalizeRequirements(itDense, saDense)
-	assert.True(t, itDense.Requirements.Get(v1.LabelTopologyZone).Has("PHX-AD-1"))
+	assert.True(t, itDense.Requirements.Get(v1.LabelTopologyZone).Has(testZonePHXAD1))
 	// DenseIO flag should exist
 	assert.True(t, itDense.Requirements.Get("oci.oraclecloud.com/dense-io-shape").Has("true"))
 
@@ -1235,14 +1240,164 @@ func TestSetOfferings_PreemptibleSpotAdded(t *testing.T) {
 	var hasOnDemand, hasSpot bool
 	for _, o := range it.Offerings {
 		switch o.Requirements.Get("karpenter.sh/capacity-type").Any() {
-		case "on-demand":
+		case corev1.CapacityTypeOnDemand:
 			hasOnDemand = true
-		case "spot":
+		case testCapacityTypeSpot:
 			hasSpot = true
 		}
 	}
 	assert.True(t, hasOnDemand, "expected on-demand offerings")
 	assert.True(t, hasSpot, "expected spot offerings for preemptible non-burstable shape")
+}
+
+func TestSetOfferings_ExcludesUnavailableOfferings(t *testing.T) {
+	unavailableOfferings := cache.NewUnavailableOfferings(cache.UnavailableOfferingsTTL)
+	// mark only the spot offering in PHX-AD-1 as out of host capacity.
+	unavailableOfferings.MarkUnavailable(context.Background(), "VM.Standard.E4.Flex", nil, nil,
+		testZonePHXAD1, testCapacityTypeSpot, "")
+
+	p := &DefaultProvider{
+		preemptibleShapes:    PreemptibleShapes{"VM.STANDARD.E4": "VM.Standard.E4"},
+		unavailableOfferings: unavailableOfferings,
+	}
+
+	shape := &ocicore.Shape{
+		Shape:              lo.ToPtr("VM.Standard.E4.Flex"),
+		MaxVnicAttachments: lo.ToPtr(4),
+	}
+	sa := &ShapeAndAd{Shape: shape, Ads: []string{"tenancy:PHX-AD-1", "tenancy:PHX-AD-2"}}
+	it := &OciInstanceType{
+		InstanceType: cloudprovider.InstanceType{Name: "VM.Standard.E4.Flex"},
+		Shape:        "VM.Standard.E4.Flex",
+	}
+
+	err := p.setOfferings(context.Background(), it, &ociv1beta1.OCINodeClass{}, sa, true, 1.0,
+		[]v1.Taint{preemptibleTaintNoSchedule})
+	assert.NoError(t, err)
+
+	for _, o := range it.Offerings {
+		capType := o.Requirements.Get("karpenter.sh/capacity-type").Any()
+		if capType == testCapacityTypeSpot && o.Zone() == testZonePHXAD1 {
+			assert.False(t, o.Available, "spot offering in PHX-AD-1 should be marked unavailable")
+		} else {
+			assert.True(t, o.Available, "offering %s/%s should remain available", capType, o.Zone())
+		}
+	}
+}
+
+func TestSetOfferings_ExcludesUnavailableOfferings_ScopedByFlexConfig(t *testing.T) {
+	unavailableOfferings := cache.NewUnavailableOfferings(cache.UnavailableOfferingsTTL)
+	// Mark only the 2 OCPU / 16 GB on-demand config of the flexible shape in PHX-AD-1 unavailable.
+	unavailableOfferings.MarkUnavailable(context.Background(), "VM.Standard.E4.Flex",
+		lo.ToPtr(float32(2)), lo.ToPtr(float32(16)), testZonePHXAD1, corev1.CapacityTypeOnDemand, "")
+
+	p := &DefaultProvider{
+		preemptibleShapes:    PreemptibleShapes{"VM.STANDARD.E4": "VM.Standard.E4"},
+		unavailableOfferings: unavailableOfferings,
+	}
+
+	shape := &ocicore.Shape{
+		Shape:              lo.ToPtr("VM.Standard.E4.Flex"),
+		MaxVnicAttachments: lo.ToPtr(4),
+	}
+	sa := &ShapeAndAd{Shape: shape, Ads: []string{"tenancy:PHX-AD-1", "tenancy:PHX-AD-2"}}
+
+	// The unavailable config: its PHX-AD-1 on-demand offering must be excluded.
+	unavailableIt := &OciInstanceType{
+		InstanceType:       cloudprovider.InstanceType{Name: "VM.Standard.E4.Flex.2o.16g"},
+		Shape:              "VM.Standard.E4.Flex",
+		SupportShapeConfig: true,
+		Ocpu:               lo.ToPtr(float32(2)),
+		MemoryInGbs:        lo.ToPtr(float32(16)),
+	}
+	err := p.setOfferings(context.Background(), unavailableIt, &ociv1beta1.OCINodeClass{}, sa, true, 1.0, nil)
+	assert.NoError(t, err)
+	for _, o := range unavailableIt.Offerings {
+		if o.Zone() == testZonePHXAD1 {
+			assert.False(t, o.Available, "the marked 2o/16g config in PHX-AD-1 should be unavailable")
+		} else {
+			assert.True(t, o.Available, "other zones of the marked config should remain available")
+		}
+	}
+
+	// A different CPU/memory config of the same shape/zone must remain fully available.
+	otherIt := &OciInstanceType{
+		InstanceType:       cloudprovider.InstanceType{Name: "VM.Standard.E4.Flex.4o.16g"},
+		Shape:              "VM.Standard.E4.Flex",
+		SupportShapeConfig: true,
+		Ocpu:               lo.ToPtr(float32(4)),
+		MemoryInGbs:        lo.ToPtr(float32(16)),
+	}
+	err = p.setOfferings(context.Background(), otherIt, &ociv1beta1.OCINodeClass{}, sa, true, 1.0, nil)
+	assert.NoError(t, err)
+	for _, o := range otherIt.Offerings {
+		assert.True(t, o.Available,
+			"a different flex config must not be suppressed by the marked config (%s/%s)",
+			o.Requirements.Get("karpenter.sh/capacity-type").Any(), o.Zone())
+	}
+}
+
+func TestSetOfferings_ExcludesUnavailableOfferings_ScopedByCompartment(t *testing.T) {
+	const (
+		clusterCompartment = "ocid1.compartment.oc1..cluster"
+		quotaCompartment   = "ocid1.compartment.oc1..quota"
+		otherCompartment   = "ocid1.compartment.oc1..other"
+	)
+
+	unavailableOfferings := cache.NewUnavailableOfferings(cache.UnavailableOfferingsTTL)
+	// A QuotaExceeded failure records the on-demand offering in PHX-AD-1 unavailable, scoped to a
+	// single (node) compartment.
+	unavailableOfferings.MarkUnavailable(context.Background(), "VM.Standard.E4.Flex", nil, nil,
+		testZonePHXAD1, corev1.CapacityTypeOnDemand, quotaCompartment)
+
+	p := &DefaultProvider{
+		clusterCompartmentId: clusterCompartment,
+		preemptibleShapes:    PreemptibleShapes{"VM.STANDARD.E4": "VM.Standard.E4"},
+		unavailableOfferings: unavailableOfferings,
+	}
+
+	shape := &ocicore.Shape{
+		Shape:              lo.ToPtr("VM.Standard.E4.Flex"),
+		MaxVnicAttachments: lo.ToPtr(4),
+	}
+	sa := &ShapeAndAd{Shape: shape, Ads: []string{"tenancy:PHX-AD-1", "tenancy:PHX-AD-2"}}
+
+	newIt := func() *OciInstanceType {
+		return &OciInstanceType{
+			InstanceType: cloudprovider.InstanceType{Name: "VM.Standard.E4.Flex"},
+			Shape:        "VM.Standard.E4.Flex",
+		}
+	}
+
+	// A NodeClass launching into the quota-affected compartment must have the PHX-AD-1 on-demand
+	// offering excluded.
+	inCompartmentIt := newIt()
+	nodeClassInCompartment := &ociv1beta1.OCINodeClass{}
+	nodeClassInCompartment.Spec.NodeCompartmentId = lo.ToPtr(quotaCompartment)
+	err := p.setOfferings(context.Background(), inCompartmentIt, nodeClassInCompartment, sa, true, 1.0, nil)
+	assert.NoError(t, err)
+	for _, o := range inCompartmentIt.Offerings {
+		capType := o.Requirements.Get("karpenter.sh/capacity-type").Any()
+		if capType == corev1.CapacityTypeOnDemand && o.Zone() == testZonePHXAD1 {
+			assert.False(t, o.Available,
+				"on-demand PHX-AD-1 offering should be unavailable for the quota-affected compartment")
+		} else {
+			assert.True(t, o.Available, "offering %s/%s should remain available", capType, o.Zone())
+		}
+	}
+
+	// A NodeClass launching into a different compartment must not be affected by the
+	// compartment-scoped quota failure.
+	otherCompartmentIt := newIt()
+	nodeClassOther := &ociv1beta1.OCINodeClass{}
+	nodeClassOther.Spec.NodeCompartmentId = lo.ToPtr(otherCompartment)
+	err = p.setOfferings(context.Background(), otherCompartmentIt, nodeClassOther, sa, true, 1.0, nil)
+	assert.NoError(t, err)
+	for _, o := range otherCompartmentIt.Offerings {
+		assert.True(t, o.Available,
+			"a compartment-scoped quota failure must not suppress offerings for another compartment (%s/%s)",
+			o.Requirements.Get("karpenter.sh/capacity-type").Any(), o.Zone())
+	}
 }
 
 func TestSetOfferings_Prices(t *testing.T) {
@@ -1370,9 +1525,9 @@ func TestSetOfferings_NoPreemptibleSpotIfTaintMissing(t *testing.T) {
 	var hasOnDemand, hasSpot bool
 	for _, o := range it.Offerings {
 		switch o.Requirements.Get("karpenter.sh/capacity-type").Any() {
-		case "on-demand":
+		case corev1.CapacityTypeOnDemand:
 			hasOnDemand = true
-		case "spot":
+		case testCapacityTypeSpot:
 			hasSpot = true
 		}
 	}
@@ -2669,5 +2824,123 @@ func TestGetMaxVnicAttachmentsForShape(t *testing.T) {
 			got := p.getMaxVnicAttachmentsForShape(context.Background(), shape, tt.ocpu)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// TestListInstanceTypes_NoDeadlockWithConcurrentWriter is a regression test for the silent
+// reconcile hang where the leader pod stopped doing work for ~30h without crashing or logging.
+//
+// ListInstanceTypes acquires p.lock.RLock for its whole duration and, deep in its call chain
+// (decorateInstanceType / setOfferings), used to re-acquire p.lock.RLock. sync.RWMutex forbids
+// recursive read-locking: once a writer (refreshShapes/reloadConfigFile, which fire on a ~24h
+// timer) calls p.lock.Lock and blocks waiting for the outer reader, every subsequent RLock --
+// including the nested one from the goroutine that already holds the outer RLock -- blocks to
+// avoid writer starvation. The outer reader then waits forever on its own nested RLock while the
+// writer waits forever on the outer reader: a permanent deadlock that wedges every controller
+// calling ListInstanceTypes.
+//
+// This test drives many concurrent ListInstanceTypes readers against a writer that repeatedly
+// grabs the write lock (as refreshShapes does). With the recursive RLock it deadlocks and the
+// watchdog fires; with the fix it completes quickly.
+func TestListInstanceTypes_NoDeadlockWithConcurrentWriter(t *testing.T) {
+	makeProvider := func() *DefaultProvider {
+		return &DefaultProvider{
+			shapeAdMap: map[string]*ShapeAndAd{
+				"VM.Standard.E3.8": {
+					Shape: &ocicore.Shape{
+						Shape:              lo.ToPtr("VM.Standard.E3.8"),
+						IsFlexible:         lo.ToPtr(false),
+						Ocpus:              lo.ToPtr(float32(8)),
+						MemoryInGBs:        lo.ToPtr(float32(64)),
+						MaxVnicAttachments: lo.ToPtr(4),
+					},
+					Ads: []string{"tenancy:PHX-AD-1", "tenancy:PHX-AD-2"},
+				},
+			},
+			shapeToPrice: map[string]*ShapePriceInfo{
+				"VM.STANDARD.E3.8": {ShapeName: lo.ToPtr("VM.Standard.E3.8"), OcpuUnitPrice: 0.05,
+					MemoryUnitPrice: 0.01, DiskUnitPrice: 0},
+			},
+			preemptibleShapes: PreemptibleShapes{"VM.STANDARD.E3": "VM.Standard.E3"},
+		}
+	}
+
+	nc := &ociv1beta1.OCINodeClass{
+		Spec: ociv1beta1.OCINodeClassSpec{
+			VolumeConfig: &ociv1beta1.VolumeConfig{
+				BootVolumeConfig: &ociv1beta1.BootVolumeConfig{
+					ImageConfig: &ociv1beta1.ImageConfig{ImageType: ociv1beta1.OKEImage},
+				},
+			},
+			NetworkConfig: &ociv1beta1.NetworkConfig{
+				PrimaryVnicConfig: &ociv1beta1.SimpleVnicConfig{
+					SubnetAndNsgConfig: &ociv1beta1.SubnetAndNsgConfig{
+						SubnetConfig: &ociv1beta1.SubnetConfig{SubnetId: lo.ToPtr("ocid1.subnet.oc1..x")},
+					},
+				},
+			},
+		},
+	}
+
+	p := makeProvider()
+
+	const (
+		readers          = 8
+		iterationsPerGor = 2000
+	)
+
+	done := make(chan struct{})
+	stopWriter := make(chan struct{})
+	writerDone := make(chan struct{})
+	// readersWg tracks only the readers: the writer runs until stopWriter is closed, so it must
+	// not be part of the completion wait or it would never let wg.Wait return.
+	var readersWg sync.WaitGroup
+
+	// Writer goroutine: mimics refreshShapes/reloadConfigFile taking p.lock.Lock periodically.
+	// The brief pause keeps the writer from starving readers (the real writers fire on a ~24h
+	// timer) while still frequently entering the "writer pending" state that triggers the old
+	// recursive-RLock deadlock.
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-stopWriter:
+				return
+			default:
+			}
+			p.lock.Lock()
+			// emulate the writers swapping the shared maps under the write lock
+			p.shapeAdMap = makeProvider().shapeAdMap
+			p.lock.Unlock()
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+
+	// Reader goroutines: call ListInstanceTypes concurrently.
+	for i := 0; i < readers; i++ {
+		readersWg.Add(1)
+		go func() {
+			defer readersWg.Done()
+			for j := 0; j < iterationsPerGor; j++ {
+				its, err := p.ListInstanceTypes(context.Background(), nc, make([]v1.Taint, 0))
+				require.NoError(t, err)
+				require.NotEmpty(t, its)
+			}
+		}()
+	}
+
+	go func() {
+		readersWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		close(stopWriter)
+		<-writerDone
+	case <-time.After(30 * time.Second):
+		close(stopWriter)
+		t.Fatal("ListInstanceTypes deadlocked with a concurrent writer: " +
+			"recursive p.lock.RLock in the ListInstanceTypes call chain")
 	}
 }

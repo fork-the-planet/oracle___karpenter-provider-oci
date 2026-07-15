@@ -26,6 +26,13 @@ const (
 	OutOfHostCapacity                   = "Out of host capacity"
 )
 
+// HTTP 400 service-error codes returned when a launch is blocked by a service
+// limit or compartment quota. These are treated as skippable capacity exhaustion.
+const (
+	LimitExceeded = "LimitExceeded"
+	QuotaExceeded = "QuotaExceeded"
+)
+
 var errNotFound = errors.New("not found")
 
 // IsRetryable returns true if the given error is retriable.
@@ -63,6 +70,12 @@ func IsRetryable(err error) bool {
 		http.StatusBadGateway,         // 502
 		http.StatusServiceUnavailable, // 503
 		http.StatusGatewayTimeout:     // 504
+		// "Out of host capacity" surfaces as an HTTP 500 on LaunchInstance. Retrying it only
+		// amplifies the host-capacity shortage and contributes to 429 throttling, so treat it as
+		// non-retryable and let the capacity-fallback logic handle it instead.
+		if IsOutOfHostCapacity(err) {
+			return false
+		}
 		return true
 	}
 	return false
@@ -116,4 +129,40 @@ func IsOutOfHostCapacity(err error) bool {
 	}
 
 	return strings.Contains(err.Error(), OutOfHostCapacity)
+}
+
+// IsServiceLimitExceeded returns true when the error is an OCI service-limit or
+// compartment-quota failure (HTTP 400 LimitExceeded/QuotaExceeded). Matching is
+// code-based rather than message-based to avoid false positives.
+func IsServiceLimitExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	serviceErr, ok := common.IsServiceError(errors.Cause(err))
+	if !ok {
+		return false
+	}
+
+	switch serviceErr.GetCode() {
+	case LimitExceeded, QuotaExceeded:
+		return true
+	}
+	return false
+}
+
+// IsQuotaExceeded returns true when the error is an OCI compartment-quota failure
+// (HTTP 400 QuotaExceeded). Quotas are administrator-defined and scoped to a specific
+// compartment and resource, unlike tenancy-scoped service limits (LimitExceeded).
+func IsQuotaExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	serviceErr, ok := common.IsServiceError(errors.Cause(err))
+	if !ok {
+		return false
+	}
+
+	return serviceErr.GetCode() == QuotaExceeded
 }

@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"time"
 
+	"github.com/oracle/karpenter-provider-oci/pkg/cache"
 	"github.com/oracle/karpenter-provider-oci/pkg/oci"
 	"github.com/oracle/karpenter-provider-oci/pkg/operator/options"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/blockstorage"
@@ -127,11 +128,17 @@ func createOperator(ctx context.Context, coreOp *operator.Operator,
 
 	identityProvider := lo.Must(identity.NewProvider(ctx, ociOptions.ClusterCompartmentId, ociClient))
 
+	// shared cache of offerings recently observed to be out of host capacity, used to drive
+	// spot->on-demand and cross-NodePool fallback.
+	unavailableOfferings := cache.NewUnavailableOfferings(
+		time.Duration(ociOptions.UnavailableOfferingsTTLSeconds) * time.Second)
+
 	instanceTypeProvider := lo.Must(instancetype.New(ctx, region, ociOptions.ClusterCompartmentId,
 		ociClient, identityProvider, clientSet, coreOp.GetAPIReader(),
 		capacityReservationProvider, computeClusterProvider, clusterPlacementGroupProvider,
 		shapeMetaFile, refreshInterval, ociOptions.GlobalShapeConfigs,
 		ociOptions.IpFamiliesFlag.IpFamilies,
+		unavailableOfferings,
 		coreOp.Elected()))
 
 	networkProvider := lo.Must(network.NewProvider(ctx, ociOptions.VcnCompartmentId,
@@ -148,7 +155,8 @@ func createOperator(ctx context.Context, coreOp *operator.Operator,
 	instancePollInterval := time.Duration(ociOptions.InstanceOperationPollIntervalInSeconds) * time.Second
 	instanceProvider := lo.Must(instance.NewProvider(ctx, ociClient, ociClient,
 		ociOptions.ClusterCompartmentId, instanceMetadataProvider, networkProvider,
-		vmTimeout, bmTimeout, ociOptions.InstanceLaunchTimeOutFailOver, instancePollInterval))
+		vmTimeout, bmTimeout, ociOptions.InstanceLaunchTimeOutFailOver, instancePollInterval,
+		unavailableOfferings))
 
 	imageProvider := lo.Must(image.NewProvider(ctx, clientSet, ociClient,
 		ociOptions.PreBakedImageCompartmentId, "", coreOp.Elected()))

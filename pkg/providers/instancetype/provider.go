@@ -20,6 +20,7 @@ import (
 
 	"github.com/coreos/go-semver/semver"
 	ociv1beta1 "github.com/oracle/karpenter-provider-oci/pkg/apis/v1beta1"
+	"github.com/oracle/karpenter-provider-oci/pkg/cache"
 	"github.com/oracle/karpenter-provider-oci/pkg/metrics"
 	"github.com/oracle/karpenter-provider-oci/pkg/oci"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/capacityreservation"
@@ -83,6 +84,7 @@ type DefaultProvider struct {
 	kubernetesInterface           kubernetes.Interface
 	k8sVersion                    *semver.Version
 	ipFamilies                    []network.IpFamily
+	unavailableOfferings          *cache.UnavailableOfferings
 
 	lock sync.RWMutex
 }
@@ -101,6 +103,7 @@ func New(ctx context.Context,
 	metaRefreshInterval time.Duration,
 	globalShapeConfigs []ociv1beta1.ShapeConfig,
 	ipFamilies []network.IpFamily,
+	unavailableOfferings *cache.UnavailableOfferings,
 	startAsync <-chan struct{}) (*DefaultProvider, error) {
 	p := &DefaultProvider{
 		region:                        region,
@@ -116,6 +119,7 @@ func New(ctx context.Context,
 		client:                        directClient,
 		ipFamilies:                    ipFamilies,
 		kubernetesInterface:           kubernetesInterface,
+		unavailableOfferings:          unavailableOfferings,
 	}
 
 	p.GlobalShapeConfigs = lo.Map(globalShapeConfigs, func(item ociv1beta1.ShapeConfig, _ int) *ociv1beta1.ShapeConfig {
@@ -791,6 +795,17 @@ func (p *DefaultProvider) isComputeClusterSupportedShape(shapeName string) bool 
 	return lo.Contains(p.computeClusterShapes, strings.ToUpper(shapeName))
 }
 
+// instanceCompartment returns the compartment instances for the NodeClass launch into: the
+// NodeClass override if set, otherwise the cluster compartment. It mirrors the instance provider's
+// GetInstanceCompartment so unavailable-offering lookups use the same compartment scope that a
+// launch failure was recorded under.
+func (p *DefaultProvider) instanceCompartment(nodeClass *ociv1beta1.OCINodeClass) string {
+	if nodeClass.Spec.NodeCompartmentId != nil {
+		return *nodeClass.Spec.NodeCompartmentId
+	}
+	return p.clusterCompartmentId
+}
+
 func (p *DefaultProvider) setOfferings(ctx context.Context, it *OciInstanceType, nodeClass *ociv1beta1.OCINodeClass,
 	shapeAndAd *ShapeAndAd, available bool, basePrice float64, taints []v1.Taint) error {
 	placementRestrictFunc, err := p.getPlacementRestrictFunc(ctx, nodeClass)
@@ -834,9 +849,31 @@ func (p *DefaultProvider) setOfferings(ctx context.Context, it *OciInstanceType,
 
 	it.Offerings = append(it.Offerings, offerings...)
 
+	// exclude offerings recently observed to be out of host capacity. Reserved offerings keep
+	// their count-based availability untouched. Two scopes are checked: tenancy-wide entries
+	// (empty compartment) covering host-capacity exhaustion and LimitExceeded service limits, and
+	// entries scoped to this NodeClass's target compartment covering compartment-specific
+	// QuotaExceeded failures.
+	if p.unavailableOfferings != nil {
+		compartment := p.instanceCompartment(nodeClass)
+		for _, offering := range it.Offerings {
+			capType := offering.CapacityType()
+			if capType == corev1.CapacityTypeReserved {
+				continue
+			}
+			if offering.Available &&
+				(p.unavailableOfferings.IsUnavailable(*shapeAndAd.Shape.Shape,
+					it.Ocpu, it.MemoryInGbs, offering.Zone(), capType, "") ||
+					p.unavailableOfferings.IsUnavailable(*shapeAndAd.Shape.Shape,
+						it.Ocpu, it.MemoryInGbs, offering.Zone(), capType, compartment)) {
+				offering.Available = false
+			}
+		}
+	}
+
 	if len(it.Offerings) > 0 {
 		for _, offering := range it.Offerings {
-			metrics.InstanceTypeOfferingAvailable.Set(float64(lo.Ternary(available, 1, 0)), map[string]string{
+			metrics.InstanceTypeOfferingAvailable.Set(float64(lo.Ternary(offering.Available, 1, 0)), map[string]string{
 				metrics.InstanceTypeLabel: it.Name,
 				metrics.CapacityTypeLabel: offering.CapacityType(),
 				metrics.ZoneLabel:         offering.Zone(),

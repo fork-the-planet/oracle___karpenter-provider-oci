@@ -164,6 +164,10 @@ spec:
             - name: RATE_LIMIT_BURST_WRITE
               value: "{{ . }}"
             {{- end }}
+            {{- if not (kindIs "invalid" .Values.settings.unavailableOfferingsTTLSeconds) }}
+            - name: UNAVAILABLE_OFFERINGS_TTL_SECONDS
+              value: "{{ .Values.settings.unavailableOfferingsTTLSeconds }}"
+            {{- end }}
             {{- with .Values.settings.flexibleShapeConfigs }}
             - name: FLEXIBLE_SHAPE_CONFIGS
               value: {{ . | toJson | quote }}

@@ -109,6 +109,15 @@ func TestIsRetryable(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "non-retryable 500 out of host capacity",
+			err: fakeServiceError{
+				httpStatus: http.StatusInternalServerError,
+				code:       "InternalError",
+				message:    "Out of host capacity.",
+			},
+			want: false,
+		},
+		{
 			name: "retryable 502",
 			err: fakeServiceError{
 				httpStatus: http.StatusBadGateway,
@@ -141,6 +150,15 @@ func TestIsRetryable(t *testing.T) {
 				httpStatus: http.StatusNotFound,
 				code:       "NotFound",
 				message:    "not found",
+			},
+			want: false,
+		},
+		{
+			name: "non-retryable 400 limit exceeded",
+			err: fakeServiceError{
+				httpStatus: http.StatusBadRequest,
+				code:       LimitExceeded,
+				message:    "service limit exceeded",
 			},
 			want: false,
 		},
@@ -234,4 +252,34 @@ func TestIsOutOfHostCapacity(t *testing.T) {
 	}))
 
 	assert.False(t, IsOutOfHostCapacity(stderrs.New("generic")))
+}
+
+func TestIsServiceLimitExceeded(t *testing.T) {
+	assert.False(t, IsServiceLimitExceeded(nil))
+
+	assert.True(t, IsServiceLimitExceeded(fakeServiceError{
+		httpStatus: http.StatusBadRequest,
+		code:       LimitExceeded,
+		message:    "service limit exceeded",
+	}))
+
+	assert.True(t, IsServiceLimitExceeded(fakeServiceError{
+		httpStatus: http.StatusBadRequest,
+		code:       QuotaExceeded,
+		message:    "compartment quota exceeded",
+	}))
+
+	assert.True(t, IsServiceLimitExceeded(pkgerrors.Wrap(fakeServiceError{
+		httpStatus: http.StatusBadRequest,
+		code:       LimitExceeded,
+		message:    "service limit exceeded",
+	}, "wrapped")))
+
+	assert.False(t, IsServiceLimitExceeded(fakeServiceError{
+		httpStatus: http.StatusBadRequest,
+		code:       "SomeOtherCode",
+		message:    "bad request",
+	}))
+
+	assert.False(t, IsServiceLimitExceeded(stderrs.New("generic")))
 }

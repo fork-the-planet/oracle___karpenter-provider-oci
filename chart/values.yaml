@@ -268,6 +268,13 @@ settings:
   # will be batched separately.
   batchIdleDuration: 1s
 
+  # -- How long, in seconds, an offering observed to be out of host capacity is treated as unavailable
+  # before Karpenter retries it. Lower values retry exhausted offerings sooner; higher values reduce
+  # repeated launch attempts (and OCI throttling) against capacity that is unlikely to recover quickly.
+  # Set to 0 to disable the unavailable-offerings cache entirely, in which case offerings are never
+  # marked unavailable and Karpenter does not route around capacity-exhausted offerings.
+  unavailableOfferingsTTLSeconds: 180
+
   # -- Feature Gate configuration values. Feature Gates will follow the same graduation process and requirements as feature gates
   # in Kubernetes. More information here https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/#feature-gates-for-alpha-or-beta-features
   featureGates:

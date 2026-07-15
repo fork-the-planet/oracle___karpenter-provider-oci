@@ -172,7 +172,11 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1.NodeClaim)
 
 	var inst *instance.InstanceInfo
 	var selectedInstanceType *instancetype.OciInstanceType
-	var capacityErr error
+	// track whether any launch attempt failed because of a skippable capacity exhaustion
+	// (host-capacity shortage or service-limit/compartment-quota) so we can surface an
+	// InsufficientCapacityError (which triggers NodeClaim deletion + reschedule) once all
+	// instance types are consumed.
+	var skipErr error
 
 	// try launch until all instance types are consumed.
 	for _, instanceType := range instanceTypes {
@@ -201,8 +205,11 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1.NodeClaim)
 		if err != nil {
 			lg.Error(err, "cannot launch instance")
 			// TODO in capacity reservation case, what error will we get if there is no capacity?
-			if instance.IsNoCapacityError(err) {
-				capacityErr = err
+			// Host-capacity shortage and service-limit/compartment-quota failures are skippable:
+			// move on to the next shape and remember the error so we can surface an
+			// InsufficientCapacityError if every candidate shape is exhausted.
+			if instance.IsSkippableLaunchError(err) {
+				skipErr = err
 				continue
 			}
 			return nil, cloudprovider.NewCreateError(fmt.Errorf("launch instance failure, %w", err),
@@ -215,13 +222,18 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1.NodeClaim)
 	}
 
 	if inst == nil {
+		// No instance type launched and at least one launch attempt failed due to a skippable
+		// capacity exhaustion (host-capacity shortage or service-limit/compartment-quota;
+		// non-skippable launch errors return earlier). Surface an InsufficientCapacityError so
+		// core Karpenter deletes the NodeClaim and reschedules, enabling fallback to other
+		// offerings / capacity types / NodePools.
+		if skipErr != nil {
+			errMsg := "all instance types exhausted due to insufficient capacity"
+			lg.Error(skipErr, errMsg)
+			return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf("%s, %w", errMsg, skipErr))
+		}
 		errMsg := "cannot create node after trying all instance types"
 		finalErr := errors.New(errMsg)
-		if capacityErr != nil {
-			finalErr = fmt.Errorf("%s, %w", errMsg, capacityErr)
-			lg.Error(finalErr, "")
-			return nil, cloudprovider.NewInsufficientCapacityError(finalErr)
-		}
 		lg.Error(finalErr, "")
 		return nil, cloudprovider.NewCreateError(finalErr, "LaunchInstanceFailed", errMsg)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/network"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/npn"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/placement"
+	"github.com/oracle/karpenter-provider-oci/pkg/utils"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,6 +122,8 @@ func minimalPlacement() *placement.Proposal {
 	pr := &placement.Proposal{Ad: "tenancy:PHX-AD-1", Fd: lo.ToPtr("FAULT-DOMAIN-1")}
 	return pr
 }
+
+const testShapeE4Flex = "VM.Standard.E4.Flex"
 
 func TestProvider_BuildDefinedTags(t *testing.T) {
 	tests := []struct {
@@ -339,6 +342,25 @@ func TestProvider_DecideCapacityType(t *testing.T) {
 			},
 			offerings: cloudprovider.Offerings{makeOffering(corev1.CapacityTypeOnDemand)},
 			want:      corev1.CapacityTypeOnDemand,
+		},
+		{
+			name:        "on-demand when spot offering is unavailable",
+			isBurstable: false,
+			claimReqs: []corev1.NodeSelectorRequirementWithMinValues{
+				{Key: corev1.CapacityTypeLabelKey, Operator: v1.NodeSelectorOpIn, Values: []string{corev1.CapacityTypeSpot}},
+			},
+			offerings: cloudprovider.Offerings{
+				{
+					Available: false,
+					Requirements: scheduling.NewRequirements(
+						scheduling.NewRequirement(corev1.CapacityTypeLabelKey, v1.NodeSelectorOpIn,
+							corev1.CapacityTypeSpot),
+					),
+					Price: 0.1,
+				},
+				makeOffering(corev1.CapacityTypeOnDemand),
+			},
+			want: corev1.CapacityTypeOnDemand,
 		},
 	}
 	for _, tt := range tests {
@@ -824,6 +846,33 @@ func TestProvider_LaunchInstance_RequestConstruction(t *testing.T) {
 		require.NotNil(t, fc.LastLaunchReq.LaunchInstanceDetails.PreemptibleInstanceConfig, "expected preemptible config")
 	})
 
+	t.Run("on-demand fallback when spot offering is unavailable", func(t *testing.T) {
+		claim := baseClaim.DeepCopy()
+		// NodePool allows both spot and on-demand, with spot preferred.
+		claim.Spec.Requirements = []corev1.NodeSelectorRequirementWithMinValues{
+			{Key: corev1.CapacityTypeLabelKey, Operator: v1.NodeSelectorOpIn,
+				Values: []string{corev1.CapacityTypeSpot, corev1.CapacityTypeOnDemand}},
+		}
+		// The shape's only spot offering is out of host capacity (Available=false, as the
+		// unavailable-offerings cache surfaces it via setOfferings), leaving on-demand available.
+		it := &instancetype.OciInstanceType{Shape: "VM.Standard.E4.Flex"}
+		spotUnavailable := makeOfferingWithCapType(corev1.CapacityTypeSpot)
+		spotUnavailable.Available = false
+		it.Offerings = cloudprovider.Offerings{
+			spotUnavailable,
+			makeOfferingWithCapType(corev1.CapacityTypeOnDemand),
+		}
+		nodeClass := baseNodeClass.DeepCopy()
+
+		_, err := p.LaunchInstance(context.TODO(), claim, nodeClass,
+			it, imgRes, netRes, nil, pp)
+		require.NoError(t, err)
+		// decideCapacityType should fall back to on-demand within the same pool, so the launch
+		// request must not carry a preemptible (spot) config.
+		require.Nil(t, fc.LastLaunchReq.LaunchInstanceDetails.PreemptibleInstanceConfig,
+			"expected on-demand fallback (no preemptible config) when the spot offering is unavailable")
+	})
+
 	t.Run("non-flexible should not set shape config", func(t *testing.T) {
 		claim := baseClaim.DeepCopy()
 		claim.Spec.Requirements = []corev1.NodeSelectorRequirementWithMinValues{
@@ -1142,6 +1191,205 @@ func TestProvider_LaunchInstance_FailurePaths(t *testing.T) {
 		fc.LaunchErr = nil
 	})
 
+}
+
+func TestProvider_LaunchInstance_MarksUnavailableOnSkippableError(t *testing.T) {
+	baseNodeClass := minimalNodeClass()
+	baseClaim := minimalNodeClaim()
+	imgRes := minimalImageResolve()
+	netRes := minimalNetworkResolve()
+	// An unscoped (generic) proposal: no capacity reservation, compute cluster, cluster placement
+	// group, or fault domain, so the offering is eligible to be cached as unavailable.
+	pp := minimalPlacement()
+	pp.Fd = nil
+
+	shape := testShapeE4Flex
+	zone := utils.AdToZoneLabelValue(pp.Ad)
+	ocpu := lo.ToPtr(float32(2))
+	memory := lo.ToPtr(float32(16))
+
+	testCases := []struct {
+		name string
+		err  error
+	}{
+		{name: "out of host capacity", err: outOfHostCapacityError()},
+		{name: "service limit exceeded", err: limitExceededError()},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakes.FakeCompute{LaunchErr: tc.err}
+			unavailable := cache.NewUnavailableOfferings(cache.UnavailableOfferingsTTL)
+			p := &DefaultProvider{
+				computeClient:        fc,
+				clusterCompartmentId: "ocid1.compartment.oc1..parent",
+				instanceCache:        cache.NewDefaultGetOrLoadCache[*InstanceInfo](),
+				vnicAttachCache:      cache.NewDefaultGetOrLoadCache[[]*ocicore.VnicAttachment](),
+				bootVolAttachCache:   cache.NewDefaultGetOrLoadCache[[]*ocicore.BootVolumeAttachment](),
+				launchTimeoutVM:      10 * time.Minute,
+				launchTimeoutBM:      20 * time.Minute,
+				pollInterval:         time.Second,
+				unavailableOfferings: unavailable,
+			}
+			imdsp, err := instancemeta.NewProvider(context.TODO(), "10.0.0.1", []byte("CA"), ipV4SingleStack)
+			require.NoError(t, err)
+			p.instanceMetaProvider = imdsp
+
+			// baseClaim has no capacity-type requirement, so decideCapacityType returns on-demand.
+			_, err = p.LaunchInstance(context.TODO(), baseClaim, baseNodeClass,
+				&instancetype.OciInstanceType{Shape: shape, SupportShapeConfig: true, Ocpu: ocpu, MemoryInGbs: memory},
+				imgRes, netRes, nil, pp)
+			require.Error(t, err)
+			// Host-capacity exhaustion and tenancy-scoped LimitExceeded apply regardless of
+			// compartment, so they are recorded under the tenancy-wide (empty compartment) scope.
+			assert.True(t, unavailable.IsUnavailable(shape, ocpu, memory, zone, corev1.CapacityTypeOnDemand, ""),
+				"expected the (shape, ocpu/memory, zone, capacity-type) offering to be marked unavailable")
+
+			// A different CPU/memory configuration of the same shape/zone/capacity-type must remain
+			// available, since only the failed config was observed to be out of capacity.
+			assert.False(t,
+				unavailable.IsUnavailable(shape, lo.ToPtr(float32(4)), memory, zone, corev1.CapacityTypeOnDemand, ""),
+				"a different flex config must not be suppressed by the failed config")
+		})
+	}
+}
+
+func TestProvider_LaunchInstance_MarksQuotaExceededScopedToCompartment(t *testing.T) {
+	baseClaim := minimalNodeClaim()
+	imgRes := minimalImageResolve()
+	netRes := minimalNetworkResolve()
+	// An unscoped (generic) proposal so the QuotaExceeded failure is eligible for caching.
+	pp := minimalPlacement()
+	pp.Fd = nil
+
+	shape := testShapeE4Flex
+	zone := utils.AdToZoneLabelValue(pp.Ad)
+	ocpu := lo.ToPtr(float32(2))
+	memory := lo.ToPtr(float32(16))
+
+	const (
+		clusterCompartment = "ocid1.compartment.oc1..parent"
+		nodeCompartment    = "ocid1.compartment.oc1..node"
+		otherCompartment   = "ocid1.compartment.oc1..other"
+	)
+
+	// The NodeClass launches into an explicit node compartment distinct from the cluster
+	// compartment, so a QuotaExceeded failure must be scoped to that node compartment.
+	nodeClass := minimalNodeClass()
+	nodeClass.Spec.NodeCompartmentId = lo.ToPtr(nodeCompartment)
+
+	fc := &fakes.FakeCompute{LaunchErr: quotaExceededError()}
+	unavailable := cache.NewUnavailableOfferings(cache.UnavailableOfferingsTTL)
+	p := &DefaultProvider{
+		computeClient:        fc,
+		clusterCompartmentId: clusterCompartment,
+		instanceCache:        cache.NewDefaultGetOrLoadCache[*InstanceInfo](),
+		vnicAttachCache:      cache.NewDefaultGetOrLoadCache[[]*ocicore.VnicAttachment](),
+		bootVolAttachCache:   cache.NewDefaultGetOrLoadCache[[]*ocicore.BootVolumeAttachment](),
+		launchTimeoutVM:      10 * time.Minute,
+		launchTimeoutBM:      20 * time.Minute,
+		pollInterval:         time.Second,
+		unavailableOfferings: unavailable,
+	}
+	imdsp, err := instancemeta.NewProvider(context.TODO(), "10.0.0.1", []byte("CA"), ipV4SingleStack)
+	require.NoError(t, err)
+	p.instanceMetaProvider = imdsp
+
+	_, err = p.LaunchInstance(context.TODO(), baseClaim, nodeClass,
+		&instancetype.OciInstanceType{Shape: shape, SupportShapeConfig: true, Ocpu: ocpu, MemoryInGbs: memory},
+		imgRes, netRes, nil, pp)
+	require.Error(t, err)
+
+	// The offering is unavailable only for the target node compartment.
+	assert.True(t, unavailable.IsUnavailable(shape, ocpu, memory, zone, corev1.CapacityTypeOnDemand, nodeCompartment),
+		"expected the offering to be marked unavailable for the target node compartment")
+	// Other compartments and the tenancy-wide scope stay available.
+	assert.False(t, unavailable.IsUnavailable(shape, ocpu, memory, zone, corev1.CapacityTypeOnDemand, otherCompartment),
+		"a QuotaExceeded failure must not suppress the offering for another compartment")
+	assert.False(t, unavailable.IsUnavailable(shape, ocpu, memory, zone, corev1.CapacityTypeOnDemand, ""),
+		"a QuotaExceeded failure must not suppress the offering tenancy-wide")
+}
+
+// A skippable (out-of-capacity) launch failure for a placement-scoped proposal must not pollute the
+// generic (shape, ocpu/memory, zone, capacity-type) offering. The unavailable-offerings cache key
+// omits placement scope (capacity reservation, compute cluster, cluster placement group, fault
+// domain), so recording a placement-scoped failure under that key would wrongly hide otherwise-valid
+// generic capacity from other NodeClaims.
+func TestProvider_LaunchInstance_SkipsMarkUnavailableForPlacementScopedProposals(t *testing.T) {
+	baseNodeClass := minimalNodeClass()
+	baseClaim := minimalNodeClaim()
+	imgRes := minimalImageResolve()
+	netRes := minimalNetworkResolve()
+
+	shape := testShapeE4Flex
+	ocpu := lo.ToPtr(float32(2))
+	memory := lo.ToPtr(float32(16))
+
+	testCases := []struct {
+		name       string
+		decorateFn func(pp *placement.Proposal)
+	}{
+		{
+			name: "capacity reservation",
+			decorateFn: func(pp *placement.Proposal) {
+				pp.CapacityReservationId = lo.ToPtr("ocid1.capacityreservation.oc1..reservation")
+			},
+		},
+		{
+			name: "compute cluster",
+			decorateFn: func(pp *placement.Proposal) {
+				pp.ComputeClusterId = lo.ToPtr("ocid1.computecluster.oc1..cluster")
+			},
+		},
+		{
+			name: "cluster placement group",
+			decorateFn: func(pp *placement.Proposal) {
+				pp.ClusterPlacementGroupId = lo.ToPtr("ocid1.clusterplacementgroup.oc1..cpg")
+			},
+		},
+		{
+			name: "fault domain",
+			decorateFn: func(pp *placement.Proposal) {
+				pp.Fd = lo.ToPtr("FAULT-DOMAIN-1")
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Start from an unscoped proposal (minimalPlacement sets a fault domain by default) so
+			// each case isolates the single placement-scope field under test.
+			pp := minimalPlacement()
+			pp.Fd = nil
+			tc.decorateFn(pp)
+			zone := utils.AdToZoneLabelValue(pp.Ad)
+
+			fc := &fakes.FakeCompute{LaunchErr: outOfHostCapacityError()}
+			unavailable := cache.NewUnavailableOfferings(cache.UnavailableOfferingsTTL)
+			p := &DefaultProvider{
+				computeClient:        fc,
+				clusterCompartmentId: "ocid1.compartment.oc1..parent",
+				instanceCache:        cache.NewDefaultGetOrLoadCache[*InstanceInfo](),
+				vnicAttachCache:      cache.NewDefaultGetOrLoadCache[[]*ocicore.VnicAttachment](),
+				bootVolAttachCache:   cache.NewDefaultGetOrLoadCache[[]*ocicore.BootVolumeAttachment](),
+				launchTimeoutVM:      10 * time.Minute,
+				launchTimeoutBM:      20 * time.Minute,
+				pollInterval:         time.Second,
+				unavailableOfferings: unavailable,
+			}
+			imdsp, err := instancemeta.NewProvider(context.TODO(), "10.0.0.1", []byte("CA"), ipV4SingleStack)
+			require.NoError(t, err)
+			p.instanceMetaProvider = imdsp
+
+			_, err = p.LaunchInstance(context.TODO(), baseClaim, baseNodeClass,
+				&instancetype.OciInstanceType{Shape: shape, SupportShapeConfig: true, Ocpu: ocpu, MemoryInGbs: memory},
+				imgRes, netRes, nil, pp)
+			require.Error(t, err)
+			assert.False(t,
+				unavailable.IsUnavailable(shape, ocpu, memory, zone, corev1.CapacityTypeOnDemand, ""),
+				"a placement-scoped launch failure must not mark the generic offering unavailable")
+		})
+	}
 }
 
 func TestProvider_Cached_Wrappers_Negative(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	ociv1beta1 "github.com/oracle/karpenter-provider-oci/pkg/apis/v1beta1"
+	"github.com/oracle/karpenter-provider-oci/pkg/cache"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/network"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -41,6 +42,7 @@ type Options struct {
 	InstanceLaunchTimeoutBMMins            int
 	InstanceOperationPollIntervalInSeconds int
 	InstanceLaunchTimeOutFailOver          bool
+	UnavailableOfferingsTTLSeconds         int
 	DisableRateLimiter                     bool
 	RateLimitQPSRead                       float64
 	RateLimitBurstRead                     int
@@ -117,6 +119,10 @@ Example in a JSON format:
 		"Intervals in seconds to decide how often instance operation result is checked")
 	fs.BoolVar(&o.InstanceLaunchTimeOutFailOver, "instance-launch-timeout-failover", false,
 		"When instance launch timeout happens, fail over to next instance types")
+	fs.IntVar(&o.UnavailableOfferingsTTLSeconds, "unavailable-offerings-ttl-seconds",
+		int(cache.UnavailableOfferingsTTL.Seconds()),
+		"How long, in seconds, an offering observed to be out of host capacity is treated as "+
+			"unavailable before Karpenter retries it. Set to 0 to disable the unavailable-offerings cache")
 	fs.BoolVar(&o.DisableRateLimiter, "disable-rate-limiter", true,
 		"Disable the OCI client-side rate limiter")
 	fs.Float64Var(&o.RateLimitQPSRead, "rate-limit-qps-read", 0,
@@ -215,6 +221,9 @@ func (o *Options) Validate() error {
 
 	if o.InstanceLaunchTimeoutBMMins <= 0 {
 		return errors.New("delete-instance-timeout-bm-mins must be a positive integer")
+	}
+	if o.UnavailableOfferingsTTLSeconds < 0 {
+		return errors.New("unavailable-offerings-ttl-seconds must be zero (to disable) or a positive integer")
 	}
 	if o.RateLimitQPSRead < 0 {
 		return errors.New("rate-limit-qps-read must be greater than or equal to 0")

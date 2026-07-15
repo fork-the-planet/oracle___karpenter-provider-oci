@@ -25,6 +25,7 @@ import (
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/network"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/npn"
 	"github.com/oracle/karpenter-provider-oci/pkg/providers/placement"
+	"github.com/oracle/karpenter-provider-oci/pkg/utils"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	ocicore "github.com/oracle/oci-go-sdk/v65/core"
 	ociwr "github.com/oracle/oci-go-sdk/v65/workrequests"
@@ -89,6 +90,7 @@ type DefaultProvider struct {
 	launchTimeoutBM       time.Duration
 	launchTimeOutFailOver bool
 	pollInterval          time.Duration
+	unavailableOfferings  *cache.UnavailableOfferings
 }
 
 func NewProvider(ctx context.Context, computeClient oci.ComputeClient,
@@ -98,7 +100,8 @@ func NewProvider(ctx context.Context, computeClient oci.ComputeClient,
 	networkProvider network.Provider,
 	launchTimeoutVM, launchTimeoutBM time.Duration,
 	launchTimeOutFailOver bool,
-	pollInterval time.Duration) (*DefaultProvider, error) {
+	pollInterval time.Duration,
+	unavailableOfferings *cache.UnavailableOfferings) (*DefaultProvider, error) {
 	p := &DefaultProvider{
 		computeClient:         computeClient,
 		workRequestClient:     workRequestClient,
@@ -112,6 +115,7 @@ func NewProvider(ctx context.Context, computeClient oci.ComputeClient,
 		launchTimeoutBM:       launchTimeoutBM,
 		launchTimeOutFailOver: launchTimeOutFailOver,
 		pollInterval:          pollInterval,
+		unavailableOfferings:  unavailableOfferings,
 	}
 
 	return p, nil
@@ -124,7 +128,7 @@ func (p *DefaultProvider) LaunchInstance(ctx context.Context,
 	imageResolveResult *image.ImageResolveResult,
 	networkResolveResult *network.NetworkResolveResult,
 	kmsKeyResolveResult *kms.KmsKeyResolveResult,
-	placementProposal *placement.Proposal) (*InstanceInfo, error) {
+	placementProposal *placement.Proposal) (result *InstanceInfo, err error) {
 	imageSource := ocicore.InstanceSourceViaImageDetails{
 		ImageId:  imageResolveResult.Images[0].Id,
 		KmsKeyId: nil,
@@ -142,13 +146,59 @@ func (p *DefaultProvider) LaunchInstance(ctx context.Context,
 		imageSource.BootVolumeVpusPerGB = nodeClass.Spec.VolumeConfig.BootVolumeConfig.VpusPerGB
 	}
 
+	capacityType := decideCapacityType(ctx, nodeClaim, instanceType)
 	var preemptibleInstanceConfig *ocicore.PreemptibleInstanceConfigDetails
 	isPreemptible := false
-	if decideCapacityType(ctx, nodeClaim, instanceType) == corev1.CapacityTypeSpot {
+	if capacityType == corev1.CapacityTypeSpot {
 		preemptibleInstanceConfig = &ocicore.PreemptibleInstanceConfigDetails{
 			PreemptionAction: &ocicore.TerminatePreemptionAction{},
 		}
 		isPreemptible = true
+	}
+
+	// When a launch attempt fails because of a skippable capacity exhaustion (host-capacity
+	// shortage or service-limit/compartment-quota), record the
+	// (shape, ocpu/memory, AD/zone, capacity-type) offering as unavailable so it is excluded from
+	// offering availability until the cache entry expires, enabling spot->on-demand and
+	// cross-NodePool fallback. Scoping by the flexible-shape CPU/memory configuration keeps a
+	// failure for one config from suppressing the shape's other configs.
+	if p.unavailableOfferings != nil {
+		defer func() {
+			if !IsSkippableLaunchError(err) {
+				return
+			}
+
+			// The unavailable-offerings cache key does not include placement scope
+			// (capacity reservation, compute cluster, cluster placement group, or fault domain).
+			// A failure scoped to one of those is narrower than the generic
+			// (shape, config, zone, capacity-type) key, so caching it would wrongly suppress
+			// otherwise-valid generic capacity for other NodeClaims. Two proposals can only share
+			// this key if they differ by one of these fields, so skipping them here also prevents a
+			// single failed proposal from suppressing an offering another proposal could still
+			// launch. This deliberately gives up cache-based fallback for placement-scoped
+			// failures; a future solution could include the placement scope in the cache key.
+			if placementProposal.CapacityReservationId != nil ||
+				placementProposal.ComputeClusterId != nil ||
+				placementProposal.ClusterPlacementGroupId != nil ||
+				placementProposal.Fd != nil {
+				return
+			}
+
+			// QuotaExceeded is an administrator-defined quota failure for a specific compartment
+			// and resource, so scope the cache entry to the target compartment; otherwise a quota
+			// failure in one node compartment would wrongly suppress the same offering for
+			// NodeClasses launching into other compartments. Host-capacity exhaustion and
+			// tenancy-scoped LimitExceeded service limits apply regardless of compartment, so they
+			// use an empty (tenancy-wide) compartment scope.
+			compartment := ""
+			if oci.IsQuotaExceeded(err) {
+				compartment = p.GetInstanceCompartment(nodeClass)
+			}
+
+			p.unavailableOfferings.MarkUnavailable(ctx, instanceType.Shape,
+				instanceType.Ocpu, instanceType.MemoryInGbs,
+				utils.AdToZoneLabelValue(placementProposal.Ad), capacityType, compartment)
+		}()
 	}
 
 	metadata, err := p.instanceMetaProvider.BuildInstanceMetadata(ctx, nodeClaim, nodeClass,

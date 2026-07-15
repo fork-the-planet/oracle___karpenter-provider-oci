@@ -89,6 +89,33 @@ var _ = Describe("Test Operator Options", func() {
 			},
 			{
 				&Options{
+					ClusterCompartmentId:           "testClusterCompartmentId",
+					VcnCompartmentId:               "testVcnCompartmentId",
+					PreBakedImageCompartmentId:     "testPreBakedImageCompartmentId",
+					ApiserverEndpoint:              "1.0.10.1",
+					ShapeMetaRefreshIntervalHours:  1,
+					InstanceLaunchTimeoutVMMins:    1,
+					InstanceLaunchTimeoutBMMins:    1,
+					UnavailableOfferingsTTLSeconds: -1,
+				},
+				"unavailable-offerings-ttl-seconds must be zero (to disable) or a positive integer",
+			},
+			{
+				// A ttl of 0 is valid and disables the unavailable-offerings cache.
+				&Options{
+					ClusterCompartmentId:           "testClusterCompartmentId",
+					VcnCompartmentId:               "testVcnCompartmentId",
+					PreBakedImageCompartmentId:     "testPreBakedImageCompartmentId",
+					ApiserverEndpoint:              "1.0.10.1",
+					ShapeMetaRefreshIntervalHours:  1,
+					InstanceLaunchTimeoutVMMins:    1,
+					InstanceLaunchTimeoutBMMins:    1,
+					UnavailableOfferingsTTLSeconds: 0,
+				},
+				"",
+			},
+			{
+				&Options{
 					GlobalShapeConfigs: []ociv1beta1.ShapeConfig{{}},
 				},
 				"global-shape-configs[0] ocpus must be >= 1",
@@ -108,26 +135,28 @@ var _ = Describe("Test Operator Options", func() {
 						{Ocpus: lo.ToPtr(float32(8))},
 						{Ocpus: lo.ToPtr(float32(2))},
 					},
-					ClusterCompartmentId:          "testClusterCompartmentId",
-					VcnCompartmentId:              "testVcnCompartmentId",
-					PreBakedImageCompartmentId:    "testPreBakedImageCompartmentId",
-					ApiserverEndpoint:             "1.0.10.1",
-					ShapeMetaRefreshIntervalHours: 1,
-					InstanceLaunchTimeoutVMMins:   1,
-					InstanceLaunchTimeoutBMMins:   1,
+					ClusterCompartmentId:           "testClusterCompartmentId",
+					VcnCompartmentId:               "testVcnCompartmentId",
+					PreBakedImageCompartmentId:     "testPreBakedImageCompartmentId",
+					ApiserverEndpoint:              "1.0.10.1",
+					ShapeMetaRefreshIntervalHours:  1,
+					InstanceLaunchTimeoutVMMins:    1,
+					InstanceLaunchTimeoutBMMins:    1,
+					UnavailableOfferingsTTLSeconds: 1,
 				},
 				"",
 			},
 			{
 				&Options{
-					ClusterCompartmentId:          "testClusterCompartmentId",
-					VcnCompartmentId:              "testVcnCompartmentId",
-					PreBakedImageCompartmentId:    "testPreBakedImageCompartmentId",
-					ApiserverEndpoint:             "1.0.10.1",
-					ShapeMetaRefreshIntervalHours: 1,
-					InstanceLaunchTimeoutVMMins:   1,
-					InstanceLaunchTimeoutBMMins:   1,
-					RateLimitQPSRead:              -1,
+					ClusterCompartmentId:           "testClusterCompartmentId",
+					VcnCompartmentId:               "testVcnCompartmentId",
+					PreBakedImageCompartmentId:     "testPreBakedImageCompartmentId",
+					ApiserverEndpoint:              "1.0.10.1",
+					ShapeMetaRefreshIntervalHours:  1,
+					InstanceLaunchTimeoutVMMins:    1,
+					InstanceLaunchTimeoutBMMins:    1,
+					UnavailableOfferingsTTLSeconds: 1,
+					RateLimitQPSRead:               -1,
 				},
 				"rate-limit-qps-read must be greater than or equal to 0",
 			},
@@ -168,6 +197,7 @@ var _ = Describe("Test Operator Options", func() {
 			"instance-launch-timeout-bm-mins",
 			"instance-operation-poll-interval-seconds",
 			"instance-launch-timeout-failover",
+			"unavailable-offerings-ttl-seconds",
 			"disable-rate-limiter",
 			"rate-limit-qps-read",
 			"rate-limit-burst-read",
@@ -217,6 +247,8 @@ var _ = Describe("Test Operator Options", func() {
 			"--instance-operation-poll-interval-seconds",
 			"5",
 			"--instance-launch-timeout-failover", // "true"
+			"--unavailable-offerings-ttl-seconds",
+			"90",
 			"--disable-rate-limiter",
 			"--rate-limit-qps-read",
 			"21",
@@ -260,6 +292,7 @@ var _ = Describe("Test Operator Options", func() {
 		Expect(o.InstanceLaunchTimeoutBMMins).To(Equal(30))
 		Expect(o.InstanceOperationPollIntervalInSeconds).To(Equal(5))
 		Expect(o.InstanceLaunchTimeOutFailOver).To(BeTrue())
+		Expect(o.UnavailableOfferingsTTLSeconds).To(Equal(90))
 		Expect(o.DisableRateLimiter).To(BeTrue())
 		Expect(o.RateLimitQPSRead).To(Equal(float64(21)))
 		Expect(o.RateLimitBurstRead).To(Equal(6))

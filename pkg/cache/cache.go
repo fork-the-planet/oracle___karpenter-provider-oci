@@ -23,6 +23,13 @@ const (
 	LongTTL = 24 * time.Hour
 	// DefaultCleanupInterval triggers cache cleanup (lazy eviction) at this interval.
 	DefaultCleanupInterval = 10 * time.Minute
+
+	// UnavailableOfferingsTTL is the default duration an offering observed to be out of host
+	// capacity is considered unavailable before Karpenter retries it. It is overridable via the
+	// --unavailable-offerings-ttl-seconds option.
+	UnavailableOfferingsTTL = 3 * time.Minute
+	// UnavailableOfferingsCleanupInterval triggers cleanup of the unavailable-offerings cache.
+	UnavailableOfferingsCleanupInterval = time.Minute
 )
 
 type LoaderFunc[T any] func(ctx context.Context, key string) (T, error)
