@@ -736,7 +736,7 @@ func (o *OCINodeClass) SetConditions(conditions []status.Condition) {
 	o.Status.Conditions = conditions
 }
 
-func (o *OCINodeClass) StatusConditions() status.ConditionSet {
+func (o *OCINodeClass) StatusConditions(...status.ForOption) status.ConditionSet {
 	var conditions = []string{
 		ConditionTypeImageReady,
 		ConditionTypeNetworkReady,

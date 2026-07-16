@@ -19,10 +19,11 @@ Karpenter helps improve utilization and control cost in Kubernetes by:
 Use a `karpenter-provider-oci` version that is compatible with your Kubernetes cluster version.
 For upstream Karpenter compatibility details, see the [Karpenter compatibility documentation](https://karpenter.sh/docs/upgrading/compatibility/).
 
-| Kubernetes Version | `karpenter-provider-oci` Version |
-| --- | --- |
-| `>= v1.31` and `<= v1.34` | `v1.0.0` or higher |
-| `>= v1.35` | `v1.1.0` or higher |
+| Kubernetes Version       | `karpenter-provider-oci` Version |
+|--------------------------|----------------------------------|
+| `>= v1.31` and `<= v1.34` | `v1.0.0` or higher               |
+| `>= v1.35` and `< v1.36` | `v1.1.0` or higher               |
+| `>= v1.36`  | `v1.3.0` or higher               |
 
 ## Installation
 

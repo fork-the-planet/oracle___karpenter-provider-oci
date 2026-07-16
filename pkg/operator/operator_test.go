@@ -30,6 +30,7 @@ import (
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	k8sclientfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 	"sigs.k8s.io/karpenter/pkg/operator"
 )
 
@@ -209,6 +211,10 @@ func (m *MockManager) GetEventRecorderFor(name string) record.EventRecorder {
 	return nil
 }
 
+func (m *MockManager) GetEventRecorder(name string) events.EventRecorder {
+	return nil
+}
+
 func (m *MockManager) GetRESTMapper() meta.RESTMapper {
 	return nil
 }
@@ -250,6 +256,10 @@ func (m *MockManager) GetLogger() logr.Logger {
 
 func (m *MockManager) GetControllerOptions() config.Controller {
 	return config.Controller{}
+}
+
+func (m *MockManager) GetConverterRegistry() conversion.Registry {
+	return conversion.NewRegistry()
 }
 
 type MockRestInterface struct{}
